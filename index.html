@@ -463,6 +463,35 @@ main{flex:1; overflow-y:auto}
 (function(){
 "use strict";
 
+/* ===== FIREBASE (guardado en la nube) =====================================
+   Pega aquí los datos de tu app web de Firebase (Configuración del proyecto →
+   Tus apps → Configuración del SDK). Si se dejan vacíos, Duet funciona en modo
+   local (datos solo en este dispositivo). ================================== */
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyBSQQGNWI1Z4qHcAW6fZvZoxjyRNbenUYc",
+  authDomain: "duet-54.firebaseapp.com",
+  projectId: "duet-54",
+  storageBucket: "duet-54.firebasestorage.app",
+  messagingSenderId: "962445644284",
+  appId: "1:962445644284:web:98bc4663bde4488429a279"
+};
+let fbFailed = false;
+function loadScript(src){
+  return new Promise((res,rej)=>{
+    const sc = document.createElement('script'); sc.src = src; sc.onload = res;
+    sc.onerror = ()=>rej(new Error('No se pudo cargar '+src)); document.head.appendChild(sc);
+  });
+}
+async function loadFirebaseDb(){
+  const V = '10.12.2';
+  await loadScript('https://www.gstatic.com/firebasejs/'+V+'/firebase-app-compat.js');
+  await loadScript('https://www.gstatic.com/firebasejs/'+V+'/firebase-firestore-compat.js');
+  firebase.initializeApp(FIREBASE_CONFIG);
+  const fs = firebase.firestore();
+  try{ fs.enablePersistence({synchronizeTabs:true}).catch(()=>{}); }catch(e){}
+  return fs;
+}
+
 /* ============================= ICONS ============================= */
 const ICONS = {
   pencil:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9a2.1 2.1 0 0 0-4-4L4 16v4Z"/><path d="M13.5 6.5l4 4"/></svg>',
@@ -856,10 +885,15 @@ async function initCloud(){
       }
     }
   }catch(e){ /* fall through to local mode */ }
+  if(FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.projectId){
+    try{ state.db = await loadFirebaseDb(); state.cloud = true; subscribeAll(); return; }
+    catch(e){ console.error('Firebase', e); fbFailed = true; }
+  }
   state.cloud = false;
   try{ const c = JSON.parse(localStorage.getItem('dc_profiles_cache')||'[]'); if(Array.isArray(c)) state.profiles = c; }catch(e){}
   state.ready = true;
   render();
+  if(fbFailed) setTimeout(()=>toast('Sin conexión con la nube: modo local'), 600);
 }
 
 function subscribeAll(){
