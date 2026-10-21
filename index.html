@@ -201,6 +201,30 @@ main{flex:1; overflow-y:auto}
 .pill .ic svg{width:11px; height:11px}
 .pill small{color:var(--fg-muted); font-weight:600; font-family:var(--font-mono); font-size:11px}
 .pill.ghost{color:var(--fg-muted); padding:5px 11px; background:transparent; border-style:dashed}
+/* ocultar / mostrar el registro rápido */
+.qb-bottom{display:flex; align-items:center; gap:6px; margin-top:8px}
+.qb-bottom .qb-pills{flex:1; min-width:0; margin-top:0}
+.qb-hide{
+  flex-shrink:0; width:30px; height:30px; border-radius:50%; border:1px solid var(--border); cursor:pointer;
+  display:grid; place-items:center; background:var(--surface-2); color:var(--fg-muted);
+}
+.qb-hide svg{width:16px; height:16px}
+.qb-hide:hover{color:var(--fg)}
+.qb-fab-wrap{
+  position:fixed; left:50%; transform:translateX(-50%); z-index:30; pointer-events:none;
+  width:calc(100% - 24px); max-width:496px; display:flex; justify-content:flex-end;
+  bottom:calc(88px + env(safe-area-inset-bottom,0px));
+}
+.qb-fab{
+  pointer-events:auto; display:flex; align-items:center; gap:8px; cursor:pointer; border:1px solid transparent;
+  background:var(--grad); color:#fff; font-weight:700; font-size:13px; padding:11px 16px 11px 13px; border-radius:999px;
+  box-shadow:0 12px 26px -10px var(--accent-joint); animation:fade .25s ease both;
+}
+.qb-fab svg{width:18px; height:18px}
+.qb-fab:active{transform:scale(.96)}
+.screen.qb-off{padding-bottom:150px}
+body.qb-hidden .toast{bottom:calc(150px + env(safe-area-inset-bottom,0px))}
+body.qb-hidden .toast-alert{bottom:calc(206px + env(safe-area-inset-bottom,0px))}
 
 /* ---------- héroe y tarjetas de cifras ---------- */
 .hero{
@@ -568,6 +592,7 @@ const ICONS = {
   trend:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8"/><path d="M15 7h6v6"/></svg>',
   download:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 19h16"/></svg>',
   flag:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3v18"/><path d="M5 4h11l-2 4 2 4H5"/></svg>',
+  chevdown:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>',
   ant:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="11" r="2.4"/><path d="M12 13.4v6.6"/><path d="M9 7.5 7 5.5M15 7.5l2-2"/><path d="M8 13l-4 1M16 13l4 1M8.5 16.5l-3 2.5M15.5 16.5l3 2.5"/></svg>',
 };
 function icon(name){ return ICONS[name] || ICONS.dots; }
@@ -623,10 +648,18 @@ const state = {
   theme:'system',
   calOffset:{individual:0, conjunto:0},
   quickType:'gasto',
+  quickHidden:false,
 };
 
 try{ state.currentProfileId = sessionStorage.getItem('dc_profile') || null; }catch(e){}
 try{ state.theme = localStorage.getItem('dc_theme') || 'system'; }catch(e){}
+try{ state.quickHidden = localStorage.getItem('dc_qb_hidden')==='1'; }catch(e){}
+function setQuickHidden(v){
+  state.quickHidden = !!v;
+  try{ localStorage.setItem('dc_qb_hidden', v?'1':'0'); }catch(e){}
+  render();
+  if(!v){ const el = document.getElementById('nl-input'); if(el) try{ el.focus(); }catch(e){} }
+}
 function applyTheme(){
   const root = document.documentElement;
   if(state.theme==='dark') root.setAttribute('data-theme','dark');
@@ -1584,7 +1617,7 @@ function renderShell(){
       </button>
     </div>
   </div>
-  <main><div class="screen${state.enter?' enter':''}">${renderTab()}</div></main>
+  <main><div class="screen${state.enter?' enter':''}${state.quickHidden?' qb-off':''}">${renderTab()}</div></main>
   ${renderQuickbar()}
   <div class="tabbar">
     ${tabBtn('individual','user','Tú')}
@@ -1597,6 +1630,10 @@ function renderShell(){
 }
 function currentQuickScope(){ return state.tab==='conjunta' ? 'conjunto' : 'individual'; }
 function renderQuickbar(){
+  document.body.classList.toggle('qb-hidden', !!state.quickHidden);
+  if(state.quickHidden){
+    return `<div class="qb-fab-wrap"><button type="button" class="qb-fab" id="qb-show" aria-label="Mostrar registro rápido">${icon('plus')}<span>Registro rápido</span></button></div>`;
+  }
   const scope = currentQuickScope();
   const favs = state.favoritos.filter(f=>f.scope===scope && f.type===state.quickType);
   return `<div class="quickbar">
@@ -1605,15 +1642,18 @@ function renderQuickbar(){
       <button class="nl-btn primary" id="nl-submit" aria-label="Añadir">${icon('plus')}</button>
       <button class="nl-btn" id="qb-more" aria-label="Más opciones (ahorro, reparto, fecha…)">${icon('dots')}</button>
     </div>
-    <div class="qb-pills">
-      <div class="qb-seg" id="qb-type-seg">
-        <button data-v="gasto" class="${state.quickType==='gasto'?'active':''}">Gasto</button>
-        <button data-v="ingreso" class="${state.quickType==='ingreso'?'active':''}">Ingreso</button>
+    <div class="qb-bottom">
+      <div class="qb-pills">
+        <div class="qb-seg" id="qb-type-seg">
+          <button data-v="gasto" class="${state.quickType==='gasto'?'active':''}">Gasto</button>
+          <button data-v="ingreso" class="${state.quickType==='ingreso'?'active':''}">Ingreso</button>
+        </div>
+        ${favs.map(f=>{ const m=catMeta(f.category,f.type); return `<button type="button" class="pill" data-fav="${f.id}">
+          <span class="ic" style="background:color-mix(in srgb, ${m.color} 22%, transparent); color:${m.color}">${icon(m.icon)}</span>${escapeHtml(f.name)} <small>${fmtMoney(f.amount)}</small>
+        </button>`; }).join('')}
+        <button type="button" class="pill ghost" id="qb-fav-add">★ Favorito</button>
       </div>
-      ${favs.map(f=>{ const m=catMeta(f.category,f.type); return `<button type="button" class="pill" data-fav="${f.id}">
-        <span class="ic" style="background:color-mix(in srgb, ${m.color} 22%, transparent); color:${m.color}">${icon(m.icon)}</span>${escapeHtml(f.name)} <small>${fmtMoney(f.amount)}</small>
-      </button>`; }).join('')}
-      <button type="button" class="pill ghost" id="qb-fav-add">★ Favorito</button>
+      <button type="button" class="qb-hide" id="qb-hide" aria-label="Ocultar registro rápido" title="Ocultar">${icon('chevdown')}</button>
     </div>
   </div>`;
 }
@@ -1647,6 +1687,10 @@ function wireShell(){
   document.querySelectorAll('#qb-type-seg button').forEach(b=>{
     b.addEventListener('click', ()=>{ state.quickType=b.getAttribute('data-v'); render(); });
   });
+  const hideBtn = document.getElementById('qb-hide');
+  if(hideBtn) hideBtn.addEventListener('click', ()=> setQuickHidden(true));
+  const showBtn = document.getElementById('qb-show');
+  if(showBtn) showBtn.addEventListener('click', ()=> setQuickHidden(false));
   const moreBtn = document.getElementById('qb-more');
   if(moreBtn) moreBtn.addEventListener('click', ()=>{
     if(!state.currentProfileId){ openAccountSheet(); return; }
