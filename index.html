@@ -447,6 +447,10 @@ main{flex:1; overflow-y:auto}
 .tool-e{font-size:24px}
 .tl-row{display:flex;gap:12px;align-items:center;padding:10px 0;position:relative}
 .tl-row:not(:last-child)::after{content:"";position:absolute;left:19px;top:48px;bottom:-8px;width:2px;background:var(--border)}
+.libre-amt{font-family:var(--font-display);font-size:44px;font-weight:700;letter-spacing:-.04em;line-height:1.05}
+.libre-line{display:flex;justify-content:space-between;gap:10px;font-size:13px;padding:8px 0;border-bottom:1px solid var(--border)}
+.libre-line:last-child{border-bottom:none}
+.libre-line.total{font-weight:700;font-size:13.5px}
 .tl-dot{width:40px;height:40px;border-radius:50%;background:var(--surface-2);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:18px;flex:none}
 </style>
 
@@ -490,6 +494,44 @@ async function loadFirebaseDb(){
   const fs = firebase.firestore();
   try{ fs.enablePersistence({synchronizeTabs:true}).catch(()=>{}); }catch(e){}
   return fs;
+}
+
+/* ---- migración: copia los datos actuales (de la BD del artifact) a Firebase ---- */
+async function migrateToFirebase(onProgress){
+  if(!(FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.projectId)){
+    throw new Error('Firebase no está configurado');
+  }
+  let fbDb;
+  try{
+    fbDb = (window.firebase && firebase.apps && firebase.apps.length) ? firebase.firestore() : await loadFirebaseDb();
+  }catch(e){ throw new Error('No se pudo conectar con Firebase'); }
+
+  const collections = {
+    perfiles: state.profiles,
+    movimientos: state.movimientosAll,
+    presupuestos: state.presupuestos,
+    metas: state.metas,
+    categorias: state.categoriasCustom,
+    recurrentes: state.recurrentes,
+    favoritos: state.favoritos,
+    inversiones: state.inversiones,
+  };
+
+  let total = 0;
+  for(const [col, items] of Object.entries(collections)){
+    if(!Array.isArray(items) || !items.length) continue;
+    let batch = fbDb.batch(), count = 0;
+    for(const item of items){
+      const {id, ...data} = item;
+      if(!id) continue;
+      batch.set(fbDb.collection(col).doc(id), data, {merge:true});
+      count++; total++;
+      if(count>=400){ await batch.commit(); batch = fbDb.batch(); count=0; }
+    }
+    if(count>0) await batch.commit();
+    if(onProgress) onProgress(col, total);
+  }
+  return total;
 }
 
 /* ============================= ICONS ============================= */
@@ -573,7 +615,7 @@ function escapeHtml(s){ return (s||'').replace(/[&<>"']/g, c => ({'&':'&amp;','<
 
 /* ============================= STATE ============================= */
 const state = {
-  cloud:false, db:null, userCap:null,
+  cloud:false, db:null, userCap:null, cloudSource:null,
   profiles:[], movimientos:[], presupuestos:[], metas:[], categoriasCustom:[], recurrentes:[], favoritos:[], inversiones:[], movimientosAll:[],
   currentProfileId: null,
   tab:'individual',
@@ -879,17 +921,17 @@ async function initCloud(){
     if(window.claude && window.claude.use){
       const [db, userCap] = await Promise.all([window.claude.use('db'), window.claude.use('user')]);
       if(db){
-        state.cloud = true; state.db = db; state.userCap = userCap;
+        state.cloud = true; state.db = db; state.userCap = userCap; state.cloudSource = 'artifact';
         subscribeAll();
         return;
       }
     }
   }catch(e){ /* fall through to local mode */ }
   if(FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.projectId){
-    try{ state.db = await loadFirebaseDb(); state.cloud = true; subscribeAll(); return; }
+    try{ state.db = await loadFirebaseDb(); state.cloud = true; state.cloudSource = 'firebase'; subscribeAll(); return; }
     catch(e){ console.error('Firebase', e); fbFailed = true; }
   }
-  state.cloud = false;
+  state.cloud = false; state.cloudSource = 'local';
   try{ const c = JSON.parse(localStorage.getItem('dc_profiles_cache')||'[]'); if(Array.isArray(c)) state.profiles = c; }catch(e){}
   state.ready = true;
   render();
@@ -1613,7 +1655,16 @@ function wireShell(){
   const nlInput = document.getElementById('nl-input');
   const nlSubmit = async ()=>{
     if(!state.currentProfileId){ openAccountSheet(); return; }
-    const parsed = parseNaturalMulti(nlInput.value);
+    let rawNl = nlInput.value, nlTag = null;
+    const hm = rawNl.match(/#([^\s#]+)/);
+    if(hm){
+      const q = normName(hm[1]);
+      const sq = t=>normName(t.name).replace(/\s+/g,'');
+      nlTag = tagsList().find(t=>sq(t)===q) || tagsList().find(t=>sq(t).startsWith(q)) || null;
+      if(!nlTag){ toast('No existe la etiqueta #'+hm[1]); return; }
+      rawNl = rawNl.replace(hm[0],' ');
+    }
+    const parsed = parseNaturalMulti(rawNl);
     if(!parsed.items.length){ toast('Escribe el importe, p. ej. "45,30 Carrefour ayer"'); return; }
     const me = profileById(state.currentProfileId);
     const other = state.profiles.find(p=>p.id!==me.id);
@@ -1625,7 +1676,7 @@ function wireShell(){
     for(const it of parsed.items){
       let split = null;
       if(scope==='conjunto' && type==='gasto'){ split = {[me.id]: it.amount/2, [other?other.id:'x']: it.amount/2}; }
-      const id = await addMovimiento({type, scope, amount:it.amount, category:'Otros', note:it.note, date:parsed.date, fixed:false, profileId:me.id, split, goalId:null, goalName:null, autoCategory:true, ...(payer?{paidBy:payer.id}:{})});
+      const id = await addMovimiento({type, scope, amount:it.amount, category:'Otros', note:it.note, date:parsed.date, fixed:false, profileId:me.id, split, goalId:null, goalName:null, autoCategory:true, ...(payer?{paidBy:payer.id}:{}), ...(nlTag?{tagId:nlTag.id}:{})});
       ids.push(id);
     }
     nlInput.value='';
@@ -1658,6 +1709,10 @@ function wireShell(){
 }
 function wireTabContent(){
   document.querySelectorAll('[data-open-alerts]').forEach(el=>el.addEventListener('click', openAlertsSheet));
+  document.querySelectorAll('[data-libre-view]').forEach(el=>el.addEventListener('click', ()=>{ state.libreView = el.getAttribute('data-libre-view'); render(); }));
+  const lbE = document.getElementById('libre-edit'); if(lbE) lbE.addEventListener('click', openLibreSheet);
+  const tgA = document.getElementById('tag-add'); if(tgA) tgA.addEventListener('click', ()=>{ if(!state.currentProfileId){ openAccountSheet(); return; } openTagSheet(); });
+  document.querySelectorAll('[data-tag-open]').forEach(el=>el.addEventListener('click', ()=>openTagDetailSheet(el.getAttribute('data-tag-open'))));
   document.querySelectorAll('[data-tool]').forEach(el=>el.addEventListener('click', ()=>openTool(el.getAttribute('data-tool'))));
   const rA=document.getElementById('rem-add'); if(rA) rA.addEventListener('click', ()=>openQuickAddSheet('gasto','individual'));
   const rN=document.getElementById('rem-none'); if(rN) rN.addEventListener('click', markNoSpendToday);
@@ -1829,6 +1884,8 @@ function renderAccountView(cfg){
 
   ${renderAlertsBanner()}
   ${renderNightReminder()}
+
+  ${cfg.scope==='conjunto' ? renderLibre() : ''}
 
   ${cfg.upcoming && cfg.upcoming.length ? `<section>
     <div class="section-head"><h2 class="row" style="gap:7px;font-size:15px"><span class="mini-ic" style="width:15px;height:15px;color:var(--warn)">${icon('bell')}</span>Próximos pagos</h2></div>
@@ -2155,6 +2212,7 @@ function openEditMovSheet(id){
         <span class="ic" style="background:color-mix(in srgb, ${c.color} 20%, transparent); color:${c.color}">${icon(c.icon)}</span><span>${escapeHtml(c.name)}</span></button>`).join('')}</div></div>` : ''}
     <div class="field"><label>Fecha</label><input id="ed-date" type="date" value="${m.date}"></div>
     <div class="field"><label>Nota</label><input id="ed-note" type="text" maxlength="60" value="${escapeHtml(m.note||'')}"></div>
+    ${tagSelectHtml('ed-tag', m.tagId)}
     <button class="btn btn-primary btn-block" id="ed-save" style="padding:14px">Guardar cambios</button>
   </div>`, ()=>{
     document.querySelectorAll('#ed-cats [data-cname]').forEach(b=>b.addEventListener('click', ()=>{
@@ -2169,6 +2227,8 @@ function openEditMovSheet(id){
       if(!date){ toast('Pon una fecha'); return; }
       const patch = {amount, date, note};
       const old = {amount:m.amount, date:m.date, note:m.note||''};
+      const tagEl = document.getElementById('ed-tag');
+      if(tagEl){ patch.tagId = tagEl.value || null; old.tagId = m.tagId || null; }
       if(hasCat && category){ patch.category = category; old.category = m.category; }
       if(m.split && m.amount>0){
         const k = amount/m.amount, ns = {};
@@ -2252,17 +2312,19 @@ function txRow(m){
   const payerP = m.paidBy ? profileById(m.paidBy) : null;
   const owner = (m.scope==='conjunto' ? ' · conjunta' : '') + (payerP ? ' · pagó '+displayName(payerP) : '');
   const sign = isGasto||m.type==='ahorro' ? '-' : '+';
-  const label = m.type==='gasto' ? m.category : (m.type==='ingreso'? m.category : (m.goalName ? (m.inversionId ? m.goalName : 'Meta: '+m.goalName) : 'Ahorro'));
+  const label = m.type==='gasto' ? m.category : (m.type==='ingreso'? m.category : (m.goalName ? (m.inversionId ? m.goalName : (m.tagId ? 'Etiqueta: '+m.goalName : 'Meta: '+m.goalName)) : 'Ahorro'));
   const fixedTag = (isGasto && m.fixed) ? (m.recurrenteId ? ' · fijo automático' : ' · fijo') : '';
   const nCom = (m.comments||[]).length;
   const reacts = Object.values(m.reactions||{});
   const social = (nCom ? ' · 💬 '+nCom : '') + (reacts.length ? ' · '+Array.from(new Set(reacts)).join('') : '');
   const sur = (m.surpriseUntil && m.surpriseUntil > todayISO()) ? ' · 🎁 sorpresa hasta '+fmtDate(m.surpriseUntil) : '';
+  const tgx = (m.tagId && m.type!=='ahorro') ? tagById(m.tagId) : null;
+  const tagTxt = tgx ? ' · 🏷 '+escapeHtml(tgx.name) : '';
   return `<div class="tx-row">
     ${m.receiptPhoto ? `<img src="${m.receiptPhoto}" data-view-photo="${m.id}" style="width:38px;height:38px;object-fit:cover;border-radius:11px;flex-shrink:0;cursor:pointer">` : `<div class="tx-icon" style="background:${bg};color:${color}">${icon(meta.icon)}</div>`}
     <div class="tx-body" data-open-mov="${m.id}" style="cursor:pointer">
       <div class="tx-title">${escapeHtml(m.note || label)}</div>
-      <div class="tx-meta">${escapeHtml(label)}${owner} · ${fmtDate(m.date)}${fixedTag}${sur}${social}</div>
+      <div class="tx-meta">${escapeHtml(label)}${owner} · ${fmtDate(m.date)}${fixedTag}${tagTxt}${sur}${social}</div>
     </div>
     <div class="tx-amount" style="color:${color}">${sign}${fmtMoney(Math.abs(m.amount))}</div>
     <button class="btn-ghost" data-edit-tx="${m.id}" style="padding:6px;border-radius:8px" aria-label="Editar">${icon('pencil')}</button>
@@ -2432,6 +2494,7 @@ function renderMetas(){
 
   return `
   ${renderDreamMap()}
+  ${renderTagsSection()}
   ${renderToolsGrid()}
   <section>
     <div class="section-head"><h2>Simulador de ahorro</h2></div>
@@ -3318,6 +3381,228 @@ function openInvDetailSheet(id){
   });
 }
 
+/* ============================= LIBRE PARA GASTAR + ETIQUETAS ============================= */
+function sumAmt(arr){ return arr.reduce((s,m)=>s+m.amount,0); }
+
+function libreData(){
+  const month = localToday().slice(0,7);
+  const joint = state.movimientos.filter(m=>m.scope==='conjunto');
+  const inM = joint.filter(m=>monthKey(m.date)===month);
+  const income = sumAmt(inM.filter(m=>m.type==='ingreso'));
+  const cfgDoc = state.presupuestos.find(p=>p.id==='libre__cfg');
+  const manual = cfgDoc && cfgDoc.base>0 ? cfgDoc.base : 0;
+  const base = manual>0 ? manual : income;
+  const recs = state.recurrentes.filter(r=>r.active!==false && r.scope==='conjunto');
+  const fixed = recs.reduce((s,r)=>s+r.amount,0) + sumAmt(inM.filter(m=>m.type==='gasto' && m.fixed && !m.recurrenteId));
+  const saved = sumAmt(inM.filter(m=>m.type==='ahorro'));
+  const free = base - fixed - saved;
+  const varSpent = sumAmt(inM.filter(m=>m.type==='gasto' && !m.fixed));
+  const left = free - varSpent;
+  const now = new Date();
+  const dim = new Date(now.getFullYear(), now.getMonth()+1, 0).getDate();
+  const daysLeft = dim - now.getDate() + 1;
+  const wk0 = isoShift(-((now.getDay()+6)%7));
+  const today = localToday();
+  const weekSpent = sumAmt(joint.filter(m=>m.type==='gasto' && !m.fixed && m.date>=wk0 && m.date<=today));
+  const weekAllow = Math.max(0, free)/dim*7;
+  const weekLeft = Math.min(weekAllow - weekSpent, left);
+  return {base, manual, income, fixed, nFixed:recs.length, saved, free, varSpent, left, daysLeft, weekSpent, weekAllow, weekLeft, perDay: Math.max(0,left)/Math.max(1,daysLeft)};
+}
+
+function renderLibre(){
+  const d = libreData();
+  const w = (state.libreView||'mes')==='semana';
+  const seg = `<div class="qb-seg">
+    <button type="button" data-libre-view="semana" class="${w?'active':''}">Semana</button>
+    <button type="button" data-libre-view="mes" class="${w?'':'active'}">Mes</button></div>`;
+  if(!(d.base>0)){
+    return `<section>
+      <div class="section-head"><h2>Libre para gastar</h2>${seg}</div>
+      <div class="card col" style="gap:10px">
+        <div class="muted" style="font-size:13px">Apunta un ingreso en la cuenta conjunta o fija cuánto entra cada mes entre los dos. Después restamos los gastos fijos compartidos y lo que ahorráis, y veréis lo que queda para gastar con libertad.</div>
+        <button class="btn btn-primary" id="libre-edit">Fijar base mensual</button>
+      </div>
+    </section>`;
+  }
+  const amount = w ? d.weekLeft : d.left;
+  const total = w ? d.weekAllow : d.free;
+  const spent = w ? d.weekSpent : d.varSpent;
+  const pct = total>0 ? Math.min(100, spent/total*100) : (spent>0 ? 100 : 0);
+  const over = amount<0;
+  const color = over ? 'var(--bad)' : (pct>80 ? 'var(--warn)' : 'var(--good)');
+  const line = (label, val, sign, col, cls)=>`<div class="libre-line ${cls||''}"><span class="${cls?'':'muted'}">${label}</span><span class="num" style="${col?'color:'+col:''}">${sign}${fmtMoney(val)}</span></div>`;
+  return `<section>
+    <div class="section-head"><h2>Libre para gastar</h2>${seg}</div>
+    <div class="card col" style="gap:12px">
+      <div>
+        <div class="muted" style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.1em">${over?'Os habéis pasado':'Os queda'} ${w?'esta semana':'este mes'}</div>
+        <div class="libre-amt num" style="color:${color};margin-top:6px">${fmtMoney(amount)}</div>
+        <div class="muted" style="font-size:12.5px;margin-top:4px">de ${fmtMoney(Math.max(0,total))} para ${w?'la semana':'el mes'} · gastado ${fmtMoney(spent)}</div>
+      </div>
+      <div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:${color}"></div></div>
+      ${d.left>0 ? `<div class="muted" style="font-size:12.5px">≈ ${fmtMoney(d.perDay)} al día durante los ${d.daysLeft} días que quedan de mes</div>` : ''}
+      <div class="col" style="gap:0">
+        ${line(d.manual>0?'Base mensual fijada':'Ingresos conjuntos del mes', d.base, '', '')}
+        ${line('Gastos fijos compartidos'+(d.nFixed?' ('+d.nFixed+')':''), d.fixed, '−', 'var(--bad)')}
+        ${line('Ahorro y etiquetas', d.saved, '−', 'var(--accent-joint)')}
+        ${line('Libre del mes', d.free, '', '', 'total')}
+        ${line('Gastado en variables', d.varSpent, '−', 'var(--bad)')}
+        ${line('Queda', d.left, '', over||d.left<0?'var(--bad)':'var(--good)', 'total')}
+      </div>
+      <button class="btn btn-block" id="libre-edit">Ajustar base mensual</button>
+    </div>
+  </section>`;
+}
+function openLibreSheet(){
+  const d = libreData();
+  sheetShell('Base mensual conjunta', `<div class="col" style="gap:12px">
+    <div class="muted" style="font-size:13px">Lo que entra cada mes para gastos compartidos. Déjalo vacío para usar los ingresos que apuntéis en la cuenta conjunta${d.income>0?' (este mes: '+fmtMoney(d.income)+')':''}.</div>
+    <div class="field"><label>Base mensual (€)</label><input id="lb-in" type="number" min="0" step="10" inputmode="decimal" value="${d.manual>0?d.manual:''}" placeholder="Usar ingresos conjuntos"></div>
+    <button class="btn btn-primary btn-block" id="lb-save" style="padding:14px">Guardar</button></div>`, ()=>{
+    document.getElementById('lb-save').addEventListener('click', async ()=>{
+      const v = parseFloat(String(document.getElementById('lb-in').value).replace(',','.'))||0;
+      await writePresupuesto('libre__cfg', {kind:'libre', base: v>0 ? v : 0});
+      closeSheet(); render(); toast('Base guardada');
+    });
+  });
+}
+
+/* ---- etiquetas: agrupan aportaciones y gastos de los dos, sin importar la categoría ---- */
+const TAG_EMOJIS = ['🏝️','✈️','💍','📦','🏠','🚗','🎁','🎓','🎉','🛟','👶','⭐'];
+function tagsList(){ return state.presupuestos.filter(p=>p.kind==='tag').sort((a,b)=>(a.createdAt||0)-(b.createdAt||0)); }
+function tagById(id){ return id ? state.presupuestos.find(p=>p.kind==='tag' && p.id===id) : null; }
+function tagEmojiOf(t){ return t.emoji || (/mudanza|mudar/i.test(t.name||'') ? '📦' : goalEmoji(t.name)); }
+function tagStats(t){
+  const mv = state.movimientos.filter(m=>m.tagId===t.id);
+  const sv = mv.filter(m=>m.type==='ahorro');
+  const by = {}; sv.forEach(m=>{ by[m.profileId] = (by[m.profileId]||0)+m.amount; });
+  return {mv, saved:sumAmt(sv), spent:sumAmt(mv.filter(m=>m.type==='gasto')), by};
+}
+function tagSelectHtml(id, sel){
+  const t = tagsList(); if(!t.length) return '';
+  return `<div class="field"><label>Etiqueta (opcional)</label><select id="${id}"><option value="">Sin etiqueta</option>${t.map(x=>`<option value="${x.id}" ${x.id===sel?'selected':''}>${escapeHtml(tagEmojiOf(x)+' '+x.name)}</option>`).join('')}</select></div>`;
+}
+function renderTagsSection(){
+  const tags = tagsList();
+  const card = t=>{
+    const s = tagStats(t);
+    const pct = t.target>0 ? Math.min(100, s.saved/t.target*100) : 0;
+    return `<div class="goal-card" data-tag-open="${t.id}" style="cursor:pointer">
+      <div class="spread">
+        <div class="row" style="gap:12px;min-width:0">
+          <div style="width:48px;height:48px;border-radius:14px;display:grid;place-items:center;font-size:24px;flex-shrink:0;background:color-mix(in srgb, var(--accent-joint) 18%, var(--surface-2))">${tagEmojiOf(t)}</div>
+          <div style="min-width:0"><div style="font-weight:700;font-size:14.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(t.name)}</div>
+            <div class="muted" style="font-size:11.5px">${s.mv.length} ${s.mv.length===1?'movimiento':'movimientos'}${t.target>0?' · objetivo '+fmtMoney(t.target):''}</div></div>
+        </div>
+        <span class="muted" style="font-size:20px">›</span>
+      </div>
+      ${t.target>0 ? `<div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:var(--accent-joint)"></div></div>` : ''}
+      <div class="spread" style="font-size:12.5px;flex-wrap:wrap">
+        <span>Ahorrado <b class="num" style="color:var(--good)">${fmtMoney(s.saved)}</b></span>
+        <span>Gastado <b class="num" style="color:var(--bad)">${fmtMoney(s.spent)}</b></span>
+      </div>
+    </div>`;
+  };
+  return `<section>
+    <div class="section-head"><h2>Etiquetas</h2><button class="btn btn-primary" id="tag-add" style="padding:8px 14px;font-size:13px">+ Etiqueta</button></div>
+    ${tags.length ? `<div class="col" style="gap:12px">${tags.map(card).join('')}</div>`
+      : `<div class="empty">Crea etiquetas como «Vacaciones Cancún», «Boda» o «Mudanza».<br>Cada una junta lo que ahorráis y lo que gastáis los dos, sea cual sea la categoría.</div>`}
+  </section>`;
+}
+function openTagSheet(t){
+  const edit = !!t;
+  let emoji = t ? (t.emoji||'') : '';
+  sheetShell(edit?'Editar etiqueta':'Nueva etiqueta', `<div class="col" style="gap:14px">
+    <div class="field"><label>Nombre</label><input id="tg-name" type="text" maxlength="30" placeholder="Vacaciones Cancún, Boda, Mudanza…" value="${escapeHtml(t?t.name:'')}"></div>
+    <div class="field"><label>Objetivo a ahorrar (opcional)</label><input id="tg-target" type="number" min="0" step="10" inputmode="decimal" placeholder="0" value="${t&&t.target?t.target:''}"></div>
+    <div class="field"><label>Emoji</label><div class="row" id="tg-emojis" style="gap:8px;flex-wrap:wrap">${TAG_EMOJIS.map(e=>`<button type="button" class="chip ${e===emoji?'active':''}" data-e="${e}" style="font-size:20px;padding:6px 11px">${e}</button>`).join('')}</div></div>
+    <button class="btn btn-primary btn-block" id="tg-submit" style="padding:14px">${edit?'Guardar cambios':'Crear etiqueta'}</button></div>`, ()=>{
+    document.querySelectorAll('#tg-emojis [data-e]').forEach(b=>b.addEventListener('click', ()=>{
+      const e = b.getAttribute('data-e'); emoji = (emoji===e) ? '' : e;
+      document.querySelectorAll('#tg-emojis [data-e]').forEach(x=>x.classList.toggle('active', x.getAttribute('data-e')===emoji));
+    }));
+    document.getElementById('tg-submit').addEventListener('click', async ()=>{
+      const name = document.getElementById('tg-name').value.trim();
+      const target = parseFloat(String(document.getElementById('tg-target').value).replace(',','.'))||0;
+      if(!name){ toast('Ponle un nombre a la etiqueta'); return; }
+      const id = edit ? t.id : 'tag__'+uid();
+      await writePresupuesto(id, {kind:'tag', name, emoji, target:target>0?target:0, createdAt: edit ? (t.createdAt||Date.now()) : Date.now()});
+      closeSheet(); render(); toast(edit?'Etiqueta actualizada':'Etiqueta creada');
+    });
+  });
+}
+async function deleteTag(id){
+  if(state.cloud){ await state.db.collection('presupuestos').doc(id).delete(); }
+  else{ state.presupuestos = state.presupuestos.filter(p=>p.id!==id); }
+  render();
+}
+function openTagMoveSheet(id, kind){
+  const t = tagById(id); if(!t) return;
+  const me = profileById(state.currentProfileId); if(!me){ openAccountSheet(); return; }
+  const save = kind==='ahorro';
+  let category = 'Otros';
+  sheetShell((save?'Añadir dinero · ':'Añadir gasto · ')+escapeHtml(t.name), `<div class="col" style="gap:14px">
+    <div class="field"><label>Importe</label><input id="tm-amount" type="number" min="0" step="0.01" inputmode="decimal" placeholder="0,00"></div>
+    <div class="field"><label>Nota (opcional)</label><input id="tm-note" type="text" maxlength="60" placeholder="Opcional"></div>
+    ${save ? '' : `<div class="field"><label>Categoría</label><div class="cat-grid" id="tm-cats">${allCats('gasto').map(c=>`<button type="button" class="cat-chip ${c.name===category?'active':''}" data-cname="${escapeHtml(c.name)}"><span class="ic" style="background:color-mix(in srgb, ${c.color} 20%, transparent); color:${c.color}">${icon(c.icon)}</span><span>${escapeHtml(c.name)}</span></button>`).join('')}</div></div>`}
+    <div class="field"><label>Fecha</label><input id="tm-date" type="date" value="${localToday()}"></div>
+    <p class="muted" style="font-size:12px;margin:0">${save ? 'Se suma a la etiqueta y cuenta como ahorro de la cuenta conjunta.' : 'Se apunta en la cuenta conjunta, repartido 50/50.'}</p>
+    <button class="btn btn-primary btn-block" id="tm-submit" style="padding:14px">Guardar</button></div>`, ()=>{
+    const amtEl = document.getElementById('tm-amount');
+    setTimeout(()=>{ try{ amtEl.focus(); }catch(e){} }, 60);
+    document.querySelectorAll('#tm-cats [data-cname]').forEach(b=>b.addEventListener('click', ()=>{
+      category = b.getAttribute('data-cname');
+      document.querySelectorAll('#tm-cats [data-cname]').forEach(x=>x.classList.toggle('active', x===b));
+    }));
+    document.getElementById('tm-submit').addEventListener('click', async ()=>{
+      const amount = parseFloat(String(amtEl.value).replace(',','.'));
+      if(!amount || amount<=0){ toast('Pon un importe válido'); return; }
+      const note = document.getElementById('tm-note').value.trim();
+      const date = document.getElementById('tm-date').value || localToday();
+      const other = state.profiles.find(p=>p.id!==me.id);
+      const split = save ? null : {[me.id]: amount/2, [other?other.id:'x']: amount/2};
+      await addMovimiento({type: save?'ahorro':'gasto', scope:'conjunto', amount, category: save?null:category, note: note || (save?'Aportación a '+t.name:''), date, fixed:false, profileId:me.id, split, goalId:null, goalName: save?t.name:null, tagId:t.id});
+      toast(save?'Dinero añadido':'Gasto apuntado'); openTagDetailSheet(id); render();
+    });
+  });
+}
+function openTagDetailSheet(id){
+  const t = tagById(id); if(!t){ closeSheet(); return; }
+  const s = tagStats(t);
+  const pct = t.target>0 ? Math.min(100, s.saved/t.target*100) : 0;
+  const bal = s.saved - s.spent;
+  const people = state.profiles.filter(identityOf);
+  const who = people.map(p=>`<div class="spread" style="font-size:13px"><span class="row" style="gap:8px"><span class="avatar" style="background:${profileColor(p)};color:${profileColor(p,true)}">${initials(p.name)}</span>${escapeHtml(displayName(p))}</span><span class="num" style="font-weight:700">${fmtMoney(s.by[p.id]||0)}</span></div>`).join('');
+  const list = s.mv.slice().sort((a,b)=>b.date.localeCompare(a.date)).slice(0,40).map(m=>{
+    const sv = m.type==='ahorro'; const p = profileById(m.profileId); const c = sv ? 'var(--good)' : 'var(--bad)';
+    return `<div class="tx-row"><div class="tx-icon" style="background:color-mix(in srgb, ${c} 16%, transparent); color:${c}">${icon(sv?'piggy':catMeta(m.category,'gasto').icon)}</div>
+      <div class="tx-body"><div class="tx-title">${escapeHtml(m.note || (sv?'Aportación':m.category||'Gasto'))}</div><div class="tx-meta">${escapeHtml(p?displayName(p):'')} · ${fmtDate(m.date)}${sv?'':' · '+escapeHtml(m.category||'')}</div></div>
+      <div class="tx-amount" style="color:${c}">${sv?'+':'-'}${fmtMoney(m.amount)}</div></div>`;
+  }).join('');
+  sheetShell(escapeHtml(tagEmojiOf(t)+' '+t.name), `<div class="col" style="gap:14px">
+    <div class="stat-grid">
+      <div class="stat-tile"><div class="label">Ahorrado</div><div class="value num" style="color:var(--good)">${fmtMoney(s.saved)}</div></div>
+      <div class="stat-tile"><div class="label">Gastado</div><div class="value num" style="color:var(--bad)">${fmtMoney(s.spent)}</div></div>
+    </div>
+    ${t.target>0 ? `<div class="col" style="gap:6px"><div class="bar-track"><div class="bar-fill" style="width:${pct}%;background:var(--accent-joint)"></div></div>
+      <div class="spread muted" style="font-size:12px"><span>${Math.round(pct)}% de ${fmtMoney(t.target)}</span><span>${s.saved>=t.target?'¡Objetivo conseguido!':'Faltan '+fmtMoney(t.target-s.saved)}</span></div></div>` : ''}
+    ${s.saved>0 ? `<div class="spread" style="font-size:13px"><span class="muted">Disponible (ahorrado − gastado)</span><b class="num" style="color:${bal>=0?'var(--good)':'var(--bad)'}">${fmtMoney(bal)}</b></div>` : ''}
+    ${who ? `<div class="col" style="gap:8px"><div class="muted" style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.1em">Ha aportado cada uno</div>${who}</div>` : ''}
+    <div class="row" style="gap:8px"><button class="btn btn-primary" id="td-save" style="flex:1">+ Añadir dinero</button><button class="btn" id="td-spend" style="flex:1">+ Gasto</button></div>
+    ${list ? `<div class="col" style="gap:0">${list}</div>` : `<div class="empty">Aún no hay movimientos.<br>Añade dinero para el futuro o apunta un gasto de esta etiqueta.</div>`}
+    <div class="row" style="gap:8px"><button class="btn" id="td-edit" style="flex:1">${icon('pencil')} Editar</button><button class="btn" id="td-del" style="flex:1;color:var(--bad)">${icon('trash')} Eliminar</button></div>
+  </div>`, ()=>{
+    document.getElementById('td-save').addEventListener('click', ()=>openTagMoveSheet(id,'ahorro'));
+    document.getElementById('td-spend').addEventListener('click', ()=>openTagMoveSheet(id,'gasto'));
+    document.getElementById('td-edit').addEventListener('click', ()=>openTagSheet(t));
+    const del = document.getElementById('td-del'); let armed = false;
+    del.addEventListener('click', async ()=>{
+      if(!armed){ armed = true; del.textContent = 'Confirmar eliminar'; return; }
+      await deleteTag(id); closeSheet(); toast('Etiqueta eliminada (los movimientos se conservan)');
+    });
+  });
+}
+
 /* ============================= RECURRENTES (gastos fijos automáticos) ============================= */
 function renderRecurrentes(){
   const active = state.recurrentes.filter(r=>r.active!==false);
@@ -3574,6 +3859,7 @@ function openAccountSheet(){
         <button class="btn btn-block" id="acct-export">${icon('download')} Exportar a CSV</button>
         <button class="btn btn-block" id="acct-import">${icon('up')} Importar CSV del banco</button>
         <input type="file" id="acct-import-file" accept=".csv,text/csv" class="hidden">
+        ${(state.cloudSource==='artifact' && FIREBASE_CONFIG.apiKey) ? `<button class="btn btn-block" id="acct-migrate">${icon('repeat')} Migrar a Firebase</button>` : ''}
       </div>`;
   }
   function wire(){
@@ -3613,6 +3899,20 @@ function openAccountSheet(){
         closeSheet();
       }catch(e){ toast('No se pudo leer el CSV'); }
     });
+    const migrateBtn = document.getElementById('acct-migrate');
+    if(migrateBtn) migrateBtn.addEventListener('click', async ()=>{
+      if(!confirm('Esto copiará todos los datos actuales a tu proyecto de Firebase. ¿Continuar?')) return;
+      migrateBtn.disabled = true; migrateBtn.textContent = 'Migrando…';
+      try{
+        const n = await migrateToFirebase();
+        toast(n+' registros migrados a Firebase');
+        closeSheet();
+      }catch(e){
+        console.error(e);
+        toast('Error al migrar: '+(e.message||'inténtalo de nuevo'));
+        migrateBtn.disabled = false; migrateBtn.textContent = 'Migrar a Firebase';
+      }
+    });
   }
 }
 
@@ -3630,6 +3930,7 @@ function openQuickAddSheet(type, scope, catName){
     <div class="col" style="gap:14px">
       <div class="field"><label>Importe</label><input id="qa-amount" type="number" min="0" step="0.01" inputmode="decimal" placeholder="0,00"></div>
       <div class="field"><label>Nota (opcional)</label><input id="qa-note" type="text" maxlength="60" placeholder="Opcional"></div>
+      ${tagSelectHtml('qa-tag','')}
       ${scope==='conjunto' && type==='gasto' ? `<p class="muted" style="font-size:12px;margin:0">Se repartirá 50/50 por defecto. Usa el botón + para un reparto distinto.</p>` : ''}
       ${scope==='conjunto' && type==='gasto' ? `<div class="field"><label>🎁 Sorpresa: ocultar a tu pareja hasta (opcional)</label><input id="qa-sur" type="date" min="${todayISO()}"></div>` : ''}
       <div class="field"><label>Foto del ticket (opcional)</label>
@@ -3656,7 +3957,7 @@ function openQuickAddSheet(type, scope, catName){
       const other = state.profiles.find(p=>p.id!==me.id);
       let split = null;
       if(scope==='conjunto' && type==='gasto'){ split = {[me.id]: amount/2, [other?other.id:'x']: amount/2}; }
-      const nid = await addMovimiento({type, scope, amount, category:catName, note, date: todayISO(), fixed:false, profileId: me.id, split, goalId:null, goalName:null, receiptPhoto: photo, surpriseUntil: (document.getElementById('qa-sur')||{}).value || null});
+      const nid = await addMovimiento({type, scope, amount, category:catName, note, date: todayISO(), fixed:false, profileId: me.id, split, goalId:null, goalName:null, receiptPhoto: photo, surpriseUntil: (document.getElementById('qa-sur')||{}).value || null, tagId: (document.getElementById('qa-tag')||{}).value || null});
       closeSheet(); undoToast((type==='gasto'?'Gasto':'Ingreso')+' guardado', [nid]); render();
     });
   });
@@ -3776,6 +4077,7 @@ function openAddSheet(){
         <label>Nota</label>
         <input id="f-note" type="text" placeholder="Opcional" maxlength="60">
       </div>
+      ${tagSelectHtml('f-tag','')}
       <div class="field">
         <label>Fecha</label>
         <input id="f-date" type="date" value="${todayISO()}">
@@ -3899,7 +4201,7 @@ function openAddSheet(){
           split = {[me.id]: a, [other?other.id:'x']: b};
         }
       }
-      const nid = await addMovimiento({type, scope, amount, category: (type==='ahorro'?null:category), note, date, fixed, profileId: me.id, split, goalId, goalName, receiptPhoto: addPhoto, surpriseUntil: (scope==='conjunto' && type==='gasto') ? (document.getElementById('f-sur').value || null) : null});
+      const nid = await addMovimiento({type, scope, amount, category: (type==='ahorro'?null:category), note, date, fixed, profileId: me.id, split, goalId, goalName, receiptPhoto: addPhoto, surpriseUntil: (scope==='conjunto' && type==='gasto') ? (document.getElementById('f-sur').value || null) : null, tagId: (document.getElementById('f-tag')||{}).value || null});
       closeSheet(); undoToast('Movimiento guardado', [nid]); render();
     });
   });
