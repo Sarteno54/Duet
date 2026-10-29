@@ -531,11 +531,31 @@ function loadScript(src){
 async function loadFirebaseDb(){
   const V = '10.12.2';
   await loadScript('https://www.gstatic.com/firebasejs/'+V+'/firebase-app-compat.js');
+  await loadScript('https://www.gstatic.com/firebasejs/'+V+'/firebase-auth-compat.js');
   await loadScript('https://www.gstatic.com/firebasejs/'+V+'/firebase-firestore-compat.js');
   firebase.initializeApp(FIREBASE_CONFIG);
   const fs = firebase.firestore();
   try{ fs.enablePersistence({synchronizeTabs:true}).catch(()=>{}); }catch(e){}
   return fs;
+}
+function linkDevice(){
+  return new Promise(resolve=>{
+    document.getElementById('app').innerHTML = `<div class="auth-wrap"><div class="card col" style="gap:12px">
+      <h2>Vincular dispositivo</h2>
+      <p class="muted" style="font-size:13px;margin:0">Solo hace falta una vez en este móvil.</p>
+      <div class="field"><label>Correo</label><input id="lk-mail" type="email" autocomplete="username"></div>
+      <div class="field"><label>Contraseña</label><input id="lk-pass" type="password" autocomplete="current-password"></div>
+      <div class="lg-msg" id="lk-msg"></div>
+      <button class="btn btn-primary btn-block" id="lk-go">Vincular</button></div></div>`;
+    document.getElementById('lk-go').onclick = async ()=>{
+      try{
+        await firebase.auth().signInWithEmailAndPassword(
+          document.getElementById('lk-mail').value.trim(),
+          document.getElementById('lk-pass').value);
+        resolve();
+      }catch(e){ document.getElementById('lk-msg').textContent = 'Correo o contraseña incorrectos'; }
+    };
+  });
 }
 
 /* ---- migración: copia los datos actuales (de la BD del artifact) a Firebase ---- */
@@ -558,6 +578,11 @@ async function migrateToFirebase(onProgress){
     favoritos: state.favoritos,
     inversiones: state.inversiones,
   };
+
+  const split = {};
+  (collections.presupuestos||[]).forEach(it=>{ (split[presCol(it.id)] = split[presCol(it.id)] || []).push(it); });
+  delete collections.presupuestos;
+  Object.assign(collections, split);
 
   let total = 0;
   for(const [col, items] of Object.entries(collections)){
@@ -620,6 +645,7 @@ const BUILTIN_CAT_META = {
   gasto:{
     Comida:{icon:'food', color:'#F59E0B'},
     Transporte:{icon:'transport', color:'#60A5FA'},
+    Gasolina:{icon:'transport', color:'#FB923C'},
     Ocio:{icon:'fun', color:'#F472B6'},
     Citas:{icon:'users', color:'#FB7185'},
     Vivienda:{icon:'home', color:'#34D399'},
@@ -642,9 +668,10 @@ const COLOR_CHOICES = ['#F59E0B','#60A5FA','#F472B6','#34D399','#F87171','#A78BF
 const MONTHS = ['ene','feb','mar','abr','may','jun','jul','ago','sep','oct','nov','dic'];
 
 function uid(){ return Math.random().toString(36).slice(2,10)+Date.now().toString(36); }
-function todayISO(){ const d=new Date(); return d.toISOString().slice(0,10); }
+function dateISO(d){ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+function todayISO(){ return dateISO(new Date()); }
 function monthKey(dateStr){ return (dateStr||todayISO()).slice(0,7); }
-function prevMonthKey(){ const d=new Date(); d.setMonth(d.getMonth()-1); return d.toISOString().slice(0,7); }
+function prevMonthKey(){ const d=new Date(); d.setMonth(d.getMonth()-1); return dateISO(d).slice(0,7); }
 function fmtMoney(n){
   const v = Math.round((n+Number.EPSILON)*100)/100;
   const sign = v<0 ? '-' : '';
@@ -727,7 +754,8 @@ const CATEGORY_RULES = [
   [/\bcita\b|romántic|san valentín|aniversario/i, 'Citas'],
   [/mercadona|carrefour|lidl|dia\b|alcampo|eroski|consum|ahorramas|supermercado|super\b/i, 'Comida'],
   [/restaurante|bar\b|cafe|café|cafeteria|cafetería|mcdonalds|burger|kebab|pizza/i, 'Comida'],
-  [/repsol|cepsa|bp\b|shell|galp|gasolina|gasolinera|parking|peaje|uber|cabify|taxi|renfe|metro|bus\b/i, 'Transporte'],
+  [/repsol|cepsa|bp\b|shell|galp|gasolina|gasolinera|diesel|diésel|combustible/i, 'Gasolina'],
+  [/parking|peaje|uber|cabify|taxi|renfe|metro|bus\b/i, 'Transporte'],
   [/netflix|spotify|hbo|disney|prime video|cine|concierto|videojuego|steam/i, 'Ocio'],
   [/alquiler|hipoteca|luz\b|electricidad|agua\b|gas\b|internet|comunidad/i, 'Vivienda'],
   [/farmacia|medico|médico|dentista|clinica|clínica|seguro medico/i, 'Salud'],
@@ -747,8 +775,8 @@ function parseNaturalInput(text){
   if(!text) return null;
   let date = todayISO();
   const low = text.toLowerCase();
-  if(/\bayer\b/.test(low)){ const d=new Date(); d.setDate(d.getDate()-1); date=d.toISOString().slice(0,10); text=text.replace(/\bayer\b/i,'').trim(); }
-  else if(/\banteayer\b/.test(low)){ const d=new Date(); d.setDate(d.getDate()-2); date=d.toISOString().slice(0,10); text=text.replace(/\banteayer\b/i,'').trim(); }
+  if(/\bayer\b/.test(low)){ const d=new Date(); d.setDate(d.getDate()-1); date=dateISO(d); text=text.replace(/\bayer\b/i,'').trim(); }
+  else if(/\banteayer\b/.test(low)){ const d=new Date(); d.setDate(d.getDate()-2); date=dateISO(d); text=text.replace(/\banteayer\b/i,'').trim(); }
   else if(/\bhoy\b/.test(low)){ text=text.replace(/\bhoy\b/i,'').trim(); }
   const m = text.match(/(\d+(?:[.,]\d{1,2})?)/);
   if(!m) return null;
@@ -777,7 +805,7 @@ function parseNaturalMulti(text){
   const out = {items:[], date:todayISO(), payer:null};
   if(!text) return out;
   const low = text.toLowerCase();
-  const shift = n=>{ const d=new Date(); d.setDate(d.getDate()-n); return d.toISOString().slice(0,10); };
+  const shift = n=>{ const d=new Date(); d.setDate(d.getDate()-n); return dateISO(d); };
   if(/\banteayer\b/.test(low)){ out.date=shift(2); text=text.replace(/\banteayer\b/i,' '); }
   else if(/\bayer\b/.test(low)){ out.date=shift(1); text=text.replace(/\bayer\b/i,' '); }
   else if(/\bhoy\b/.test(low)){ text=text.replace(/\bhoy\b/i,' '); }
@@ -842,6 +870,30 @@ async function ensureRecurringCharged(){
   }
 }
 
+
+/* ---- gasolina: kilómetros y coste por cada 100 km ---- */
+function fuelFieldHtml(id, km, hidden){
+  return `<div class="field" id="${id}-wrap" style="${hidden?'display:none':''}"><label>Kilómetros recorridos</label>
+    <input id="${id}" type="number" min="0" step="0.1" inputmode="decimal" placeholder="Km (opcional)" value="${km||''}">
+    <div class="faint" id="${id}-calc" style="font-size:12.5px;margin-top:4px"></div></div>`;
+}
+function per100(amount, km){ return (km>0 && amount>0) ? amount/km*100 : 0; }
+function readKm(id){
+  const el = document.getElementById(id); if(!el) return null;
+  const v = parseFloat(String(el.value).replace(',','.'));
+  return v>0 ? v : null;
+}
+function wireFuelCalc(amtId, kmId){
+  const upd = ()=>{
+    const a = parseFloat(String(document.getElementById(amtId).value).replace(',','.'));
+    const k = readKm(kmId), out = document.getElementById(kmId+'-calc');
+    if(!out) return;
+    const c = per100(a, k);
+    out.textContent = c ? '≈ '+fmtMoney(c)+' cada 100 km' : '';
+  };
+  [amtId, kmId].forEach(i=>{ const el=document.getElementById(i); if(el) el.addEventListener('input', upd); });
+  upd();
+}
 /* ============================= EXPORT CSV ============================= */
 async function exportCSV(){
   const cols = ['Fecha','Tipo','Ámbito','Categoría','Importe','Nota','Fijo'];
@@ -979,7 +1031,7 @@ async function initCloud(){
     }
   }catch(e){ /* fall through to local mode */ }
   if(FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.projectId){
-    try{ state.db = await loadFirebaseDb(); state.cloud = true; state.cloudSource = 'firebase'; subscribeAll(); return; }
+    try{ state.db = await loadFirebaseDb(); const _u = await new Promise(res=>{ const un=firebase.auth().onAuthStateChanged(u=>{un();res(u);}); }); if(!_u) await linkDevice(); state.cloud = true; state.cloudSource = 'firebase'; subscribeAll(); return; }
     catch(e){ console.error('Firebase', e); fbFailed = true; }
   }
   state.cloud = false; state.cloudSource = 'local';
@@ -989,49 +1041,84 @@ async function initCloud(){
   if(fbFailed) setTimeout(()=>toast('Sin conexión con la nube: modo local'), 600);
 }
 
+/* Documentos de configuración que antes vivían en 'presupuestos' ahora tienen su colección */
+const PRES_COLS = ['presupuestos','configuraciones','etiquetas','cierres','rachas'];
+function presCol(id){
+  id = String(id||'');
+  if(/^(cfg|hr)__/.test(id) || id==='duelo__cfg' || id==='libre__cfg') return 'configuraciones';
+  if(id.startsWith('tag__')) return 'etiquetas';
+  if(id.startsWith('cierre__')) return 'cierres';
+  if(id.startsWith('chk__')) return 'rachas';
+  return 'presupuestos';
+}
+let _moving = false;
+async function movePresupuestosLegacy(docs){
+  const old = docs.filter(d=>presCol(d.id)!=='presupuestos');
+  if(!old.length || _moving) return;
+  _moving = true;
+  try{
+    for(const d of old){
+      await state.db.collection(presCol(d.id)).doc(d.id).set(d.data());
+      await state.db.collection('presupuestos').doc(d.id).delete();
+    }
+  }catch(e){ console.error('Migración de colecciones', e); }
+  _moving = false;
+}
+/* Agrupa varios snapshots de Firestore en un único render por frame */
+let _rq = 0;
+function scheduleRender(){
+  if(_rq) return;
+  _rq = requestAnimationFrame(()=>{ _rq = 0; render(); });
+}
 function subscribeAll(){
   let pending = 7;
   const done = ()=>{ pending--; if(pending<=0 && !state.ready){ state.ready=true; render(); ensureRecurringCharged(); ensureVariableBudget(); } };
 
   state.db.collection('perfiles').orderBy('createdAt','asc').onSnapshot(snap=>{
     state.profiles = snap.docs.map(d=>({id:d.id, ...d.data()}));
-    done(); render();
+    done(); scheduleRender();
   }, err=>{ console.error('perfiles', err); done(); });
 
   state.db.collection('movimientos').orderBy('date','desc').onSnapshot(snap=>{
     state.movimientosAll = snap.docs.map(d=>({id:d.id, ...d.data()}));
     applyVisibility();
-    done(); render();
+    done(); scheduleRender();
   }, err=>{ console.error('movimientos', err); done(); });
 
-  state.db.collection('presupuestos').onSnapshot(snap=>{
-    state.presupuestos = snap.docs.map(d=>({id:d.id, ...d.data()}));
-    render();
-  }, err=>{ console.error('presupuestos', err); });
+  const presParts = {};
+  const mergePres = ()=>{ const m = new Map(); Object.values(presParts).forEach(arr=>arr.forEach(x=>m.set(x.id,x))); state.presupuestos = Array.from(m.values()); scheduleRender(); };
+  PRES_COLS.forEach(col=>{
+    presParts[col] = [];
+    state.db.collection(col).onSnapshot(snap=>{
+      presParts[col] = snap.docs.map(d=>({id:d.id, ...d.data()}));
+      if(col==='presupuestos') movePresupuestosLegacy(snap.docs);
+      mergePres();
+    }, err=>{ console.error(col, err); });
+  });
 
   state.db.collection('metas').orderBy('createdAt','asc').onSnapshot(snap=>{
     state.metas = snap.docs.map(d=>({id:d.id, ...d.data()}));
-    done(); render();
+    done(); scheduleRender();
   }, err=>{ console.error('metas', err); done(); });
 
   state.db.collection('categorias').orderBy('createdAt','asc').onSnapshot(snap=>{
     state.categoriasCustom = snap.docs.map(d=>({id:d.id, ...d.data()}));
-    done(); render();
+    done(); scheduleRender();
   }, err=>{ console.error('categorias', err); done(); });
 
   state.db.collection('recurrentes').orderBy('createdAt','asc').onSnapshot(snap=>{
     state.recurrentes = snap.docs.map(d=>({id:d.id, ...d.data()}));
-    done(); render();
+    done(); scheduleRender();
   }, err=>{ console.error('recurrentes', err); done(); });
 
   state.db.collection('favoritos').orderBy('createdAt','asc').onSnapshot(snap=>{
     state.favoritos = snap.docs.map(d=>({id:d.id, ...d.data()}));
-    done(); render();
+    done(); scheduleRender();
   }, err=>{ console.error('favoritos', err); done(); });
 
   state.db.collection('inversiones').orderBy('createdAt','asc').onSnapshot(snap=>{
     state.inversiones = snap.docs.map(d=>({id:d.id, ...d.data()}));
-    done(); render();
+    done(); scheduleRender();
   }, err=>{ console.error('inversiones', err); done(); });
 }
 
@@ -1093,7 +1180,7 @@ async function deleteMovimiento(id){
 }
 async function writePresupuesto(key, data){
   if(state.cloud){
-    await state.db.collection('presupuestos').doc(key).set(data);
+    await state.db.collection(presCol(key)).doc(key).set(data);
   }else{
     const i = state.presupuestos.findIndex(p=>p.id===key);
     if(i>=0) state.presupuestos[i] = {id:key, ...data};
@@ -1102,7 +1189,7 @@ async function writePresupuesto(key, data){
 }
 async function setPresupuesto(key, data){
   if(state.cloud){
-    await state.db.collection('presupuestos').doc(key).set(data);
+    await state.db.collection(presCol(key)).doc(key).set(data);
   }else{
     const i = state.presupuestos.findIndex(p=>p.id===key);
     if(i>=0) state.presupuestos[i] = {id:key, ...data};
@@ -1222,7 +1309,7 @@ function monthlySeries(list, months){
   const keys = [];
   for(let i=months-1;i>=0;i--){
     const d = new Date(now.getFullYear(), now.getMonth()-i, 1);
-    keys.push(d.toISOString().slice(0,7));
+    keys.push(dateISO(d).slice(0,7));
   }
   return keys.map(k=>{
     const inM = list.filter(m=>monthKey(m.date)===k);
@@ -1232,42 +1319,50 @@ function monthlySeries(list, months){
 }
 
 function weeklySummary(list){
-  const now = new Date();
-  const startThis = new Date(now); startThis.setDate(now.getDate()-6); startThis.setHours(0,0,0,0);
-  const startPrev = new Date(startThis); startPrev.setDate(startThis.getDate()-7);
-  const inRange = (d,a,b)=>{ const dt=new Date(d+'T00:00:00'); return dt>=a && dt<b; };
-  const thisWeek = list.filter(m=>m.type==='gasto' && inRange(m.date, startThis, new Date(now.getTime()+86400000)));
-  const prevWeek = list.filter(m=>m.type==='gasto' && inRange(m.date, startPrev, startThis));
-  if(!thisWeek.length && !prevWeek.length) return null;
-  const biggest = thisWeek.slice().sort((a,b)=>b.amount-a.amount)[0] || null;
-  const sumByCat = arr=>{ const m={}; arr.forEach(x=>{ m[x.category]=(m[x.category]||0)+x.amount; }); return m; };
-  const curCat = sumByCat(thisWeek), prevCat = sumByCat(prevWeek);
-  let savedCat=null, savedAmt=0;
-  Object.keys(prevCat).forEach(cat=>{
-    const diff = prevCat[cat] - (curCat[cat]||0);
-    if(diff>savedAmt){ savedAmt=diff; savedCat=cat; }
-  });
-  return {biggest, savedCat, savedAmt, totalThis: thisWeek.reduce((s,m)=>s+m.amount,0)};
+  const from = isoShift(-6), pFrom = isoShift(-13), pTo = isoShift(-7);
+  const cur = list.filter(m=>m.date>=from && m.date<=isoShift(0));
+  const prev = list.filter(m=>m.date>=pFrom && m.date<=pTo);
+  const sum = (arr,type)=>arr.filter(m=>m.type===type).reduce((t,m)=>t+m.amount,0);
+  const gastado = sum(cur,'gasto'), gastadoPrev = sum(prev,'gasto');
+  const ahorrado = sum(cur,'ahorro'), ahorradoPrev = sum(prev,'ahorro');
+  if(!gastado && !gastadoPrev && !ahorrado) return null;
+  const byCat = arr=>{ const o={}; arr.filter(m=>m.type==='gasto').forEach(m=>{ o[m.category]=(o[m.category]||0)+m.amount; }); return o; };
+  const c = byCat(cur), p = byCat(prev);
+  let top=null, topDiff=0;
+  Object.keys(c).forEach(cat=>{ const d = c[cat]-(p[cat]||0); if(d>topDiff){ topDiff=d; top=cat; } });
+  return {gastado, gastadoPrev, ahorrado, ahorradoPrev, top, topDiff, topPrev: top ? (p[top]||0) : 0, topNow: top ? c[top] : 0};
 }
 function renderWeeklySummary(list){
   const s = weeklySummary(list);
   if(!s) return '';
+  const delta = (now, before, badWhenUp)=>{
+    if(!before) return '';
+    const pct = Math.round((now-before)/before*100);
+    if(pct===0) return '<div class="kpi-delta muted">= que la semana pasada</div>';
+    const up = pct>0;
+    return `<div class="kpi-delta ${up===badWhenUp?'up':'down'}">${up?'▲':'▼'} ${Math.abs(pct)} % vs. semana pasada</div>`;
+  };
+  const meta = s.top ? catMeta(s.top,'gasto') : null;
   return `<section>
-    <div class="section-head"><h2>Resumen semanal</h2></div>
-    <div class="card col" style="gap:10px">
-      <div class="spread"><span class="muted" style="font-size:12.5px">Gastado esta semana</span><span class="num" style="font-weight:700">${fmtMoney(s.totalThis)}</span></div>
-      ${s.biggest ? `<div class="tx-row" style="padding:0;border:none">
-        <div class="tx-icon" style="background:color-mix(in srgb, ${catMeta(s.biggest.category,'gasto').color} 18%, transparent); color:${catMeta(s.biggest.category,'gasto').color}">${icon(catMeta(s.biggest.category,'gasto').icon)}</div>
-        <div class="tx-body"><div class="tx-title">Mayor gasto: ${escapeHtml(s.biggest.note||s.biggest.category)}</div><div class="tx-meta">${escapeHtml(s.biggest.category)} · ${fmtDate(s.biggest.date)}</div></div>
-        <div class="tx-amount" style="color:var(--bad)">${fmtMoney(s.biggest.amount)}</div>
-      </div>` : `<div class="muted" style="font-size:12.5px">Sin gastos esta semana todavía.</div>`}
-      ${s.savedCat ? `<div class="row" style="gap:8px;font-size:12.5px;color:var(--good)"><span class="mini-ic" style="width:15px;height:15px">${icon('down')}</span> Ahorraste ${fmtMoney(s.savedAmt)} en ${escapeHtml(s.savedCat)} vs. la semana pasada</div>` : ''}
+    <div class="section-head"><h2>Resumen semanal</h2><span class="muted" style="font-size:12px">Últimos 7 días</span></div>
+    <div class="stat-grid">
+      <div class="stat-tile"><div class="label">Gastado</div><div class="value num">${fmtMoney(s.gastado)}</div>${delta(s.gastado, s.gastadoPrev, true)}</div>
+      <div class="stat-tile"><div class="label">Ahorrado</div><div class="value num">${fmtMoney(s.ahorrado)}</div>${delta(s.ahorrado, s.ahorradoPrev, false)}</div>
+    </div>
+    <div class="card" style="margin-top:12px">
+      ${s.top ? `<div class="tx-row" style="padding:0;border:none">
+        <div class="tx-icon" style="background:color-mix(in srgb, ${meta.color} 18%, transparent); color:${meta.color}">${icon(meta.icon)}</div>
+        <div class="tx-body"><div class="tx-title">Se ha disparado: ${escapeHtml(s.top)}</div>
+          <div class="tx-meta">${s.topPrev ? 'Pasaste de '+fmtMoney(s.topPrev)+' a '+fmtMoney(s.topNow) : 'Gasto nuevo esta semana'}</div></div>
+        <div class="tx-amount" style="color:var(--bad)">+${fmtMoney(s.topDiff)}</div>
+      </div>` : `<div class="row" style="gap:8px;font-size:13px;color:var(--good)">${icon('down')} Ninguna categoría ha subido respecto a la semana pasada</div>`}
     </div>
   </section>`;
 }
 
 /* ============================= RENDER ROOT ============================= */
 function render(){
+  if(_rq){ cancelAnimationFrame(_rq); _rq = 0; }
   applyVisibility();
   const app = document.getElementById('app');
   if(!state.ready){
@@ -2272,6 +2367,7 @@ function openEditMovSheet(id){
     <div class="field"><label>Importe</label><input id="ed-amount" type="number" min="0" step="0.01" inputmode="decimal" value="${m.amount}"></div>
     ${hasCat ? `<div class="field"><label>Categoría</label><div class="cat-grid" id="ed-cats">${cats.map(c=>`<button type="button" class="cat-chip ${c.name===category?'active':''}" data-cname="${escapeHtml(c.name)}">
         <span class="ic" style="background:color-mix(in srgb, ${c.color} 20%, transparent); color:${c.color}">${icon(c.icon)}</span><span>${escapeHtml(c.name)}</span></button>`).join('')}</div></div>` : ''}
+    ${hasCat && m.type==='gasto' ? fuelFieldHtml('ed-km', m.km||'', category!=='Gasolina') : ''}
     <div class="field"><label>Fecha</label><input id="ed-date" type="date" value="${m.date}"></div>
     <div class="field"><label>Nota</label><input id="ed-note" type="text" maxlength="60" value="${escapeHtml(m.note||'')}"></div>
     ${tagSelectHtml('ed-tag', m.tagId)}
@@ -2279,8 +2375,10 @@ function openEditMovSheet(id){
   </div>`, ()=>{
     document.querySelectorAll('#ed-cats [data-cname]').forEach(b=>b.addEventListener('click', ()=>{
       category = b.getAttribute('data-cname');
+      const kw = document.getElementById('ed-km-wrap'); if(kw) kw.style.display = category==='Gasolina' ? '' : 'none';
       document.querySelectorAll('#ed-cats [data-cname]').forEach(x=>x.classList.toggle('active', x===b));
     }));
+    if(document.getElementById('ed-km')) wireFuelCalc('ed-amount','ed-km');
     document.getElementById('ed-save').addEventListener('click', async ()=>{
       const amount = parseFloat(String(document.getElementById('ed-amount').value).replace(',','.'));
       const date = document.getElementById('ed-date').value;
@@ -2292,6 +2390,7 @@ function openEditMovSheet(id){
       const tagEl = document.getElementById('ed-tag');
       if(tagEl){ patch.tagId = tagEl.value || null; old.tagId = m.tagId || null; }
       if(hasCat && category){ patch.category = category; old.category = m.category; }
+      if(m.type==='gasto' && document.getElementById('ed-km')){ patch.km = category==='Gasolina' ? readKm('ed-km') : null; old.km = m.km || null; }
       if(m.split && m.amount>0){
         const k = amount/m.amount, ns = {};
         Object.keys(m.split).forEach(pid=>{ ns[pid] = Math.round(m.split[pid]*k*100)/100; });
@@ -2323,7 +2422,7 @@ function computeAlerts(){
   });
   [['individual', me.id], ['conjunto', null]].forEach(([sc,pid])=>{
     upcomingRecurrentes(sc, pid, 3).forEach(x=>{
-      out.push({key:'rec:'+x.r.id+':'+x.due.toISOString().slice(0,10), kind:'due', icon:'repeat', title:x.r.name,
+      out.push({key:'rec:'+x.r.id+':'+dateISO(x.due), kind:'due', icon:'repeat', title:x.r.name,
         text: fmtMoney(x.r.amount)+' · '+(x.days<=0?'se cobra hoy':x.days===1?'se cobra mañana':'se cobra en '+x.days+' días')});
     });
   });
@@ -2661,11 +2760,11 @@ function openChallengeSheet(kind){
       if(kind==='52weeks'){
         target = v*1378;
         name = 'Reto 52 semanas';
-        const d = new Date(); d.setDate(d.getDate()+364); deadline = d.toISOString().slice(0,10);
+        const d = new Date(); d.setDate(d.getDate()+364); deadline = dateISO(d);
       }else{
         target = v;
         name = 'Mes sin gastos hormiga';
-        const d = new Date(); d.setDate(d.getDate()+30); deadline = d.toISOString().slice(0,10);
+        const d = new Date(); d.setDate(d.getDate()+30); deadline = dateISO(d);
       }
       await addMeta({scope, profileId: scope==='individual'? me.id: null, name, target, deadline});
       closeSheet(); toast('¡Reto creado!');
@@ -2695,7 +2794,7 @@ function renderCitasBudget(month){
     </div></section>`;
 }
 
-const DEFAULT_SHARES = {Comida:.25, Vivienda:.30, Transporte:.10, Ocio:.10, Salud:.05, Compras:.10, Otros:.10};
+const DEFAULT_SHARES = {Comida:.25, Vivienda:.30, Transporte:.05, Gasolina:.05, Ocio:.10, Salud:.05, Compras:.10, Otros:.10};
 function monthKeysBack(n){
   const now = new Date(); const out=[];
   for(let i=1;i<=n;i++){ const d=new Date(now.getFullYear(), now.getMonth()-i, 1); out.push(d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')); }
@@ -2792,6 +2891,7 @@ function openMovSheet(id){
       <div class="spread"><span class="muted" style="font-size:13px">${escapeHtml(label)} · ${fmtDate(m.date)}${m.scope==='conjunto'?' · conjunta':''}</span>
         <span class="num" style="font-weight:700;color:${isGasto?'var(--bad)':m.type==='ingreso'?'var(--good)':'var(--accent-joint)'}">${isGasto||m.type==='ahorro'?'-':'+'}${fmtMoney(m.amount)}</span></div>
       <button class="btn" id="mv-edit">${icon('pencil')} Editar importe, categoría o fecha</button>
+      ${m.km ? `<div class="card row" style="gap:14px;justify-content:space-around;text-align:center"><div><div class="num" style="font-weight:700">${fmtMoney(m.amount)}</div><div class="faint" style="font-size:11.5px">gastado</div></div><div><div class="num" style="font-weight:700">${String(Math.round(m.km*10)/10).replace('.',',')} km</div><div class="faint" style="font-size:11.5px">recorridos</div></div><div><div class="num" style="font-weight:700">${fmtMoney(per100(m.amount,m.km))}</div><div class="faint" style="font-size:11.5px">cada 100 km</div></div></div>` : ''}
       ${isGasto && lifeHtml(m.amount)?`<div class="faint" style="font-size:12.5px">${lifeHtml(m.amount)}</div>`:''}
       <div class="row" style="gap:8px;flex-wrap:wrap" id="mv-reacts">
         ${REACTIONS.map(e=>{
@@ -3187,7 +3287,7 @@ function timelineEvents(){
   const cita=mv.find(m=>m.type==='gasto' && m.category==='Citas'); if(cita) ev.push({d:cita.date, e:'🍷', t:'Primera cita apuntada'});
   const months={}; mv.forEach(m=>{ const k=monthKey(m.date); months[k]=(months[k]||0)+(m.type==='ingreso'?m.amount:m.type==='gasto'?-m.amount:0); });
   const pos=Object.keys(months).sort().find(k=>months[k]>0); if(pos) ev.push({d:pos+'-28', e:'📈', t:'Primer mes en positivo'});
-  state.inversiones.slice().sort((a,b)=>(a.createdAt||0)-(b.createdAt||0)).slice(0,1).forEach(i=>ev.push({d:new Date(i.createdAt||Date.now()).toISOString().slice(0,10), e:'📊', t:'Primera inversión: '+i.name}));
+  state.inversiones.slice().sort((a,b)=>(a.createdAt||0)-(b.createdAt||0)).slice(0,1).forEach(i=>ev.push({d:dateISO(new Date(i.createdAt||Date.now())), e:'📊', t:'Primera inversión: '+i.name}));
   state.presupuestos.filter(p=>p.kind==='cierre').forEach(c=>ev.push({d:(c.month||'')+'-28', e:'🤝', t:'Cierre de mes de '+monthLabelOf(c.month)}));
   return ev.sort((a,b)=>a.d.localeCompare(b.d));
 }
@@ -3594,7 +3694,7 @@ function openTagSheet(t){
   });
 }
 async function deleteTag(id){
-  if(state.cloud){ await state.db.collection('presupuestos').doc(id).delete(); }
+  if(state.cloud){ await state.db.collection(presCol(id)).doc(id).delete(); }
   else{ state.presupuestos = state.presupuestos.filter(p=>p.id!==id); }
   render();
 }
@@ -3991,27 +4091,18 @@ function openQuickAddSheet(type, scope, catName){
     </div>
     <div class="col" style="gap:14px">
       <div class="field"><label>Importe</label><input id="qa-amount" type="number" min="0" step="0.01" inputmode="decimal" placeholder="0,00"></div>
+      ${catName==='Gasolina' ? fuelFieldHtml('qa-km','') : ''}
       <div class="field"><label>Nota (opcional)</label><input id="qa-note" type="text" maxlength="60" placeholder="Opcional"></div>
       ${tagSelectHtml('qa-tag','')}
       ${scope==='conjunto' && type==='gasto' ? `<p class="muted" style="font-size:12px;margin:0">Se repartirá 50/50 por defecto. Usa el botón + para un reparto distinto.</p>` : ''}
       ${scope==='conjunto' && type==='gasto' ? `<div class="field"><label>🎁 Sorpresa: ocultar a tu pareja hasta (opcional)</label><input id="qa-sur" type="date" min="${todayISO()}"></div>` : ''}
-      <div class="field"><label>Foto del ticket (opcional)</label>
-        <input type="file" id="qa-photo" accept="image/*" capture="environment">
-        <div id="qa-photo-preview"></div>
-      </div>
       <button class="btn btn-primary btn-block" id="qa-submit" style="padding:14px">Guardar ${type==='gasto'?'gasto':'ingreso'}</button>
     </div>`;
   openSheetWith(html, ()=>{
     document.getElementById('sheet-close').addEventListener('click', closeSheet);
     const amtEl = document.getElementById('qa-amount');
     setTimeout(()=>{ try{ amtEl.focus(); }catch(e){} }, 60);
-    const photoEl = document.getElementById('qa-photo');
-    photoEl.addEventListener('change', async ()=>{
-      const file = photoEl.files[0];
-      if(!file) return;
-      try{ photo = await compressPhoto(file); document.getElementById('qa-photo-preview').innerHTML = `<img src="${photo}" style="width:72px;height:72px;object-fit:cover;border-radius:10px;margin-top:6px">`; }
-      catch(e){ toast('No se pudo leer la foto'); }
-    });
+    if(catName==='Gasolina') wireFuelCalc('qa-amount','qa-km');
     document.getElementById('qa-submit').addEventListener('click', async ()=>{
       const amount = parseFloat(amtEl.value);
       if(!amount || amount<=0){ toast('Pon un importe válido'); return; }
@@ -4019,7 +4110,7 @@ function openQuickAddSheet(type, scope, catName){
       const other = state.profiles.find(p=>p.id!==me.id);
       let split = null;
       if(scope==='conjunto' && type==='gasto'){ split = {[me.id]: amount/2, [other?other.id:'x']: amount/2}; }
-      const nid = await addMovimiento({type, scope, amount, category:catName, note, date: todayISO(), fixed:false, profileId: me.id, split, goalId:null, goalName:null, receiptPhoto: photo, surpriseUntil: (document.getElementById('qa-sur')||{}).value || null, tagId: (document.getElementById('qa-tag')||{}).value || null});
+      const nid = await addMovimiento({type, scope, amount, category:catName, note, date: todayISO(), fixed:false, profileId: me.id, split, goalId:null, goalName:null, ...(catName==='Gasolina' && readKm('qa-km') ? {km: readKm('qa-km')} : {}), receiptPhoto: photo, surpriseUntil: (document.getElementById('qa-sur')||{}).value || null, tagId: (document.getElementById('qa-tag')||{}).value || null});
       closeSheet(); undoToast((type==='gasto'?'Gasto':'Ingreso')+' guardado', [nid]); render();
     });
   });
@@ -4111,6 +4202,7 @@ function openAddSheet(){
         <label>Categoría</label>
         <div class="cat-grid" id="f-cat-grid"></div>
       </div>
+      ${fuelFieldHtml('f-km','',true)}
       <div class="field" id="fixed-wrap" style="display:none">
         <label>Tipo de gasto</label>
         <div class="segmented" id="fixed-seg">
@@ -4148,11 +4240,6 @@ function openAddSheet(){
         <label>🎁 Sorpresa: ocultar a tu pareja hasta (opcional)</label>
         <input id="f-sur" type="date" min="${todayISO()}">
       </div>
-      <div class="field">
-        <label>Foto del ticket (opcional)</label>
-        <input type="file" id="f-photo" accept="image/*" capture="environment">
-        <div id="f-photo-preview"></div>
-      </div>
       <button class="btn btn-primary btn-block" id="f-submit" style="padding:14px">Guardar movimiento</button>
     </div>`;
 
@@ -4160,21 +4247,19 @@ function openAddSheet(){
   openSheetWith(html, ()=>{
     document.getElementById('sheet-close').addEventListener('click', closeSheet);
     const goalSel = document.getElementById('f-goal');
-    const photoEl = document.getElementById('f-photo');
-    photoEl.addEventListener('change', async ()=>{
-      const file = photoEl.files[0];
-      if(!file) return;
-      try{ addPhoto = await compressPhoto(file); document.getElementById('f-photo-preview').innerHTML = `<img src="${addPhoto}" style="width:72px;height:72px;object-fit:cover;border-radius:10px;margin-top:6px">`; }
-      catch(e){ toast('No se pudo leer la foto'); }
-    });
 
+    function updateFuelVisibility(){
+      document.getElementById('f-km-wrap').style.display = (type==='gasto' && category==='Gasolina') ? '' : 'none';
+    }
     function highlightCat(){
+      updateFuelVisibility();
       document.querySelectorAll('#f-cat-grid [data-cname]').forEach(b=>{
         b.classList.toggle('active', b.getAttribute('data-cname')===category);
       });
     }
     function updateFixedVisibility(){
       document.getElementById('fixed-wrap').style.display = (type==='gasto') ? '' : 'none';
+      updateFuelVisibility();
     }
     function fillCats(){
       if(type==='gasto' || type==='ingreso'){
@@ -4213,6 +4298,7 @@ function openAddSheet(){
       document.getElementById('sur-wrap').style.display = (scope==='conjunto' && type==='gasto') ? '' : 'none';
     }
     fillCats(); updateSplitVisibility();
+    wireFuelCalc('f-amount','f-km');
 
     document.querySelectorAll('#type-seg button').forEach(b=>{
       b.addEventListener('click', ()=>{
@@ -4263,7 +4349,7 @@ function openAddSheet(){
           split = {[me.id]: a, [other?other.id:'x']: b};
         }
       }
-      const nid = await addMovimiento({type, scope, amount, category: (type==='ahorro'?null:category), note, date, fixed, profileId: me.id, split, goalId, goalName, receiptPhoto: addPhoto, surpriseUntil: (scope==='conjunto' && type==='gasto') ? (document.getElementById('f-sur').value || null) : null, tagId: (document.getElementById('f-tag')||{}).value || null});
+      const nid = await addMovimiento({type, scope, amount, category: (type==='ahorro'?null:category), note, date, fixed, profileId: me.id, split, goalId, goalName, ...(type==='gasto' && category==='Gasolina' && readKm('f-km') ? {km: readKm('f-km')} : {}), receiptPhoto: addPhoto, surpriseUntil: (scope==='conjunto' && type==='gasto') ? (document.getElementById('f-sur').value || null) : null, tagId: (document.getElementById('f-tag')||{}).value || null});
       closeSheet(); undoToast('Movimiento guardado', [nid]); render();
     });
   });
