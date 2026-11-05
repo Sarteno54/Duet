@@ -553,7 +553,12 @@ function linkDevice(){
           document.getElementById('lk-mail').value.trim(),
           document.getElementById('lk-pass').value);
         resolve();
-      }catch(e){ document.getElementById('lk-msg').textContent = 'Correo o contraseña incorrectos'; }
+      }catch(e){
+        const c = (e && e.code) || '';
+        document.getElementById('lk-msg').textContent =
+          /network|too-many|api-key|operation-not-allowed|unauthorized-domain/.test(c) ? 'Error de conexión o configuración ('+c+')'
+          : (c==='auth/user-not-found' ? 'Ese usuario no existe en Firebase (créalo en Authentication)' : 'Correo o contraseña incorrectos');
+      }
     };
   });
 }
@@ -1013,7 +1018,7 @@ function toast(msg, opt){
     el.appendChild(b);
   }
   host.appendChild(el);
-  setTimeout(()=>{ el.remove(); }, opt ? 6500 : 2400);
+  setTimeout(()=>{ el.remove(); }, opt ? 6500 : (/modo local/.test(msg) ? 8000 : 2400));
 }
 function undoToast(msg, ids){
   toast(msg, {label:'Deshacer', fn: async ()=>{ for(const id of ids) await deleteMovimiento(id); toast('Deshecho'); }});
@@ -1039,7 +1044,7 @@ async function initCloud(){
   try{ const c = JSON.parse(localStorage.getItem('dc_profiles_cache')||'[]'); if(Array.isArray(c)) state.profiles = c; }catch(e){}
   state.ready = true;
   render();
-  if(fbFailed) setTimeout(()=>toast('Sin conexión con la nube: modo local'), 600);
+  if(fbFailed) setTimeout(()=>toast('Sin conexión con la nube: modo local. Lo que añadas NO se guardará ni se sincronizará'), 600);
 }
 
 /* Documentos de configuración que antes vivían en 'presupuestos' ahora tienen su colección */
