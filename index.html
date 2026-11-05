@@ -656,6 +656,7 @@ const BUILTIN_CAT_META = {
   ingreso:{
     'Nómina':{icon:'up', color:'#4ADE80'},
     Extra:{icon:'up', color:'#2DD4BF'},
+    Intereses:{icon:'chart', color:'#FBBF24'},
     Otros:{icon:'dots', color:'#9AA1AD'},
   }
 };
@@ -1072,7 +1073,7 @@ function scheduleRender(){
 }
 function subscribeAll(){
   let pending = 7;
-  const done = ()=>{ pending--; if(pending<=0 && !state.ready){ state.ready=true; render(); ensureRecurringCharged(); ensureVariableBudget(); } };
+  const done = ()=>{ pending--; if(pending<=0 && !state.ready){ state.ready=true; render(); ensureRecurringCharged(); ensureVariableBudget(); ensureMetaInterest(); } };
 
   state.db.collection('perfiles').orderBy('createdAt','asc').onSnapshot(snap=>{
     state.profiles = snap.docs.map(d=>({id:d.id, ...d.data()}));
@@ -1098,7 +1099,7 @@ function subscribeAll(){
 
   state.db.collection('metas').orderBy('createdAt','asc').onSnapshot(snap=>{
     state.metas = snap.docs.map(d=>({id:d.id, ...d.data()}));
-    done(); scheduleRender();
+    done(); scheduleRender(); if(state.ready) ensureMetaInterest();
   }, err=>{ console.error('metas', err); done(); });
 
   state.db.collection('categorias').orderBy('createdAt','asc').onSnapshot(snap=>{
@@ -1136,16 +1137,29 @@ async function addProfile(name, pin){
   }
   return id;
 }
-async function addMovimiento(data){
-  const id = uid();
+async function addMovimiento(data, forcedId){
+  const id = forcedId || uid();
   let rec = {...data, createdAt:Date.now()};
   if(rec.autoCategory && rec.type==='gasto'){
     const guessed = guessCategory(rec.note, 'gasto');
     if(guessed) rec.category = guessed;
     delete rec.autoCategory;
   }
+  Object.keys(rec).forEach(k=>{ if(rec[k]===undefined) delete rec[k]; });
   if(state.cloud){
-    await state.db.collection('movimientos').doc(id).set(rec);
+    // Escritura optimista: no esperamos al servidor (si hay mala conexión o reglas, el await se quedaba colgado)
+    const exists = state.movimientosAll.some(x=>x.id===id);
+    if(!exists){
+      state.movimientosAll.unshift({id, ...rec});
+      state.movimientosAll.sort((a,b)=> String(b.date).localeCompare(String(a.date)));
+      applyVisibility();
+    }
+    Promise.resolve(state.db.collection('movimientos').doc(id).set(rec)).catch(e=>{
+      console.error('addMovimiento', e);
+      state.movimientosAll = state.movimientosAll.filter(x=>x.id!==id);
+      applyVisibility(); render();
+      toast('No se pudo guardar: '+((e && (e.code||e.message))||'error'));
+    });
   }else{
     state.movimientosAll.unshift({id, ...rec});
     state.movimientosAll.sort((a,b)=> b.date.localeCompare(a.date));
@@ -1811,6 +1825,7 @@ function wireShell(){
   });
   const nlInput = document.getElementById('nl-input');
   const nlSubmit = async ()=>{
+   try{
     if(!state.currentProfileId){ openAccountSheet(); return; }
     let rawNl = nlInput.value, nlTag = null;
     const hm = rawNl.match(/#([^\s#]+)/);
@@ -1839,6 +1854,7 @@ function wireShell(){
     nlInput.value='';
     undoToast(ids.length>1 ? ids.length+' movimientos añadidos' : 'Movimiento añadido'+(payer?' · pagó '+displayName(payer):''), ids);
     render();
+   }catch(e){ console.error(e); toast('Error al añadir: '+(e&&e.message||e)); }
   };
   if(nlInput){
     document.getElementById('nl-submit').addEventListener('click', nlSubmit);
@@ -2030,8 +2046,8 @@ function renderAccountView(cfg){
   return `
   <div class="hero">
     <div class="hero-scope">${cfg.scopeLabel.toUpperCase()}</div>
-    <div class="hero-amount num">${fmtMoney(t.balance)}</div>
-    <div class="muted" style="font-size:12.5px;margin-top:2px">${escapeHtml(cfg.subtitle)} · balance de todo el historial</div>
+    <div class="hero-amount num" style="${t.balance<0?'color:var(--bad)':''}">${fmtMoney(t.balance)}</div>
+    <div class="muted" style="font-size:12.5px;margin-top:2px">${escapeHtml(cfg.subtitle)} · balance de todo el historial${t.balance<0?' · <b style="color:var(--bad)">en negativo</b>':''}</div>
     <div class="hero-sub">
       <div class="item"><span class="faint" style="font-size:11px">Ingresos</span><span class="v" style="color:var(--good)">${fmtMoney(t.ingresos)}</span></div>
       <div class="item"><span class="faint" style="font-size:11px">Gastos</span><span class="v" style="color:var(--bad)">${fmtMoney(t.gastos)}</span></div>
@@ -2650,6 +2666,8 @@ function renderMetas(){
         <span class="num muted">${pace.done?'de '+fmtMoney(g.target):'faltan '+fmtMoney(Math.max(0,g.target-current))+' de '+fmtMoney(g.target)}</span>
       </div>
       <div style="font-size:12px;line-height:1.4;color:${pace.color}">${escapeHtml(pace.text)}</div>
+      ${parseFloat(g.rate)>0 ? `<div class="spread" style="font-size:12.5px"><span class="muted">Interés generado (${String(g.rate).replace('.',',')}% TAE)</span><span class="num" style="font-weight:700;color:var(--good)">+${fmtMoney(g.interestPaid && g.interestAmount!=null ? g.interestAmount : metaInterestNow(g, linked))}</span></div>
+      <div class="muted" style="font-size:11.5px">${g.interestPaid ? 'Ya ingresado en tu saldo' : (g.deadline ? 'Se ingresará en el saldo el '+fmtDate(g.deadline) : 'Pon fecha de fin para ingresarlo en el saldo')}</div>` : ''}
     </div>`;
   }).join('');
 
@@ -2695,6 +2713,43 @@ function fmtEta(months){
   if(months<1) return 'menos de 1 mes';
   if(months<=18) return Math.ceil(months)+(Math.ceil(months)===1?' mes':' meses');
   return (months/12).toFixed(1).replace('.',',')+' años';
+}
+function metaInterestCalc(g, linked, endISO){
+  const r = (parseFloat(g.rate)||0)/100;
+  if(!(r>0)) return 0;
+  const end = new Date((endISO||todayISO())+'T00:00:00');
+  let tot = 0;
+  linked.forEach(m=>{
+    const days = Math.max(0, (end - new Date(m.date+'T00:00:00'))/86400000);
+    tot += m.amount*(Math.pow(1+r, days/365)-1);
+  });
+  return Math.round(tot*100)/100;
+}
+function metaInterestNow(g, linked){
+  const t = todayISO();
+  return metaInterestCalc(g, linked, (g.deadline && g.deadline<t) ? g.deadline : t);
+}
+let _intBusy = false;
+async function ensureMetaInterest(){
+  if(_intBusy || !state.ready) return;
+  _intBusy = true;
+  try{
+    for(const g of state.metas){
+      if(g.interestPaid || !g.deadline || !(parseFloat(g.rate)>0) || g.deadline > todayISO()) continue;
+      const pid = g.profileId || state.currentProfileId;
+      if(!pid) continue;
+      const linked = state.movimientosAll.filter(m=>m.type==='ahorro' && m.goalId===g.id);
+      const amt = metaInterestCalc(g, linked, g.deadline);
+      const mid = 'int_'+g.id;
+      if(amt>0 && !state.movimientosAll.some(m=>m.id===mid)){
+        await addMovimiento({type:'ingreso', scope:g.scope, amount:amt, category:'Intereses', note:'Intereses: '+g.name, date:g.deadline, fixed:false, profileId:pid, split:null, goalId:null, goalName:null, metaInterestId:g.id}, mid);
+      }
+      g.interestPaid = true; g.interestAmount = amt;
+      if(state.cloud){ try{ await state.db.collection('metas').doc(g.id).update({interestPaid:true, interestAmount:amt}); }catch(e){ console.error(e); } }
+    }
+  }catch(e){ console.error('interest', e); }
+  _intBusy = false;
+  render();
 }
 function goalPace(g, linked, current){
   const remaining = Math.max(0, (g.target||0)-current);
@@ -4327,7 +4382,8 @@ function openAddSheet(){
     });
 
     document.getElementById('f-submit').addEventListener('click', async ()=>{
-      const amount = parseFloat(document.getElementById('f-amount').value);
+     try{
+      const amount = parseFloat(String(document.getElementById('f-amount').value).replace(',','.'));
       if(!amount || amount<=0){ toast('Pon un importe válido'); return; }
       const note = document.getElementById('f-note').value.trim();
       const date = document.getElementById('f-date').value || todayISO();
@@ -4351,6 +4407,7 @@ function openAddSheet(){
       }
       const nid = await addMovimiento({type, scope, amount, category: (type==='ahorro'?null:category), note, date, fixed, profileId: me.id, split, goalId, goalName, ...(type==='gasto' && category==='Gasolina' && readKm('f-km') ? {km: readKm('f-km')} : {}), receiptPhoto: addPhoto, surpriseUntil: (scope==='conjunto' && type==='gasto') ? (document.getElementById('f-sur').value || null) : null, tagId: (document.getElementById('f-tag')||{}).value || null});
       closeSheet(); undoToast('Movimiento guardado', [nid]); render();
+     }catch(e){ console.error(e); toast('Error al guardar: '+(e&&e.message||e)); }
     });
   });
 }
@@ -4377,7 +4434,8 @@ function openGoalSheet(g){
       </div>`}
       <div class="field"><label>Nombre de la meta</label><input id="g-name" type="text" placeholder="Viaje, fondo de emergencia…" maxlength="40" value="${escapeHtml(g?g.name:'')}"></div>
       <div class="field"><label>Importe objetivo</label><input id="g-target" type="number" min="1" step="1" placeholder="0" value="${g?g.target:''}"></div>
-      <div class="field"><label>Fecha límite (opcional)</label><input id="g-deadline" type="date" value="${g&&g.deadline?g.deadline:''}"></div>
+      <div class="field"><label>Fecha de fin (opcional)</label><input id="g-deadline" type="date" value="${g&&g.deadline?g.deadline:''}"></div>
+      <div class="field"><label>Interés anual TAE % (opcional)</label><input id="g-rate" type="number" min="0" step="0.01" inputmode="decimal" placeholder="Ej. 3,5" value="${g&&g.rate?g.rate:''}"></div>
       <div class="field"><label>Emoji</label>
         <div class="row" id="g-emojis" style="gap:8px;flex-wrap:wrap">${GOAL_EMOJIS.map(e=>`<button type="button" class="chip ${e===emoji?'active':''}" data-e="${e}" style="font-size:20px;padding:6px 11px">${e}</button>`).join('')}</div></div>
       <div class="field"><label>Foto (opcional)</label>
@@ -4415,8 +4473,9 @@ function openGoalSheet(g){
       const deadline = document.getElementById('g-deadline').value || null;
       if(!name){ toast('Ponle nombre a la meta'); return; }
       if(!target || target<=0){ toast('Pon un importe objetivo'); return; }
-      if(edit){ await updateMeta(g.id, {name, target, deadline, emoji, photo}); closeSheet(); toast('Meta actualizada'); }
-      else{ await addMeta({scope, profileId: scope==='individual'? me.id: null, name, target, deadline, emoji, photo}); closeSheet(); toast('Meta creada'); }
+      const rate = parseFloat(String(document.getElementById('g-rate').value).replace(',','.')) || 0;
+      if(edit){ await updateMeta(g.id, {name, target, deadline, emoji, photo, rate}); closeSheet(); toast('Meta actualizada'); ensureMetaInterest(); }
+      else{ await addMeta({scope, profileId: scope==='individual'? me.id: null, name, target, deadline, emoji, photo, rate}); closeSheet(); toast('Meta creada'); ensureMetaInterest(); }
     });
   });
 }
